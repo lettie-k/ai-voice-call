@@ -1,0 +1,6 @@
+# 从私人仓库拷来、还没洗干净的原件（有私人注释），永远不进仓库
+.raw/
+node_modules/
+.env
+*.onnx
+models/
