@@ -1,0 +1,22 @@
+{
+  "name": "ai-voice-call-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "跟你的 AI 打电话：通话中继（转写 · 模型 · 合成 · 打断 · 听语气）",
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "ticket": "node tools/make-ticket.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "dotenv": "^16.4.5",
+    "opusscript": "^0.1.1",
+    "ws": "^8.18.0"
+  },
+  "optionalDependencies": {
+    "sherpa-onnx-node": "^1.10.0"
+  }
+}

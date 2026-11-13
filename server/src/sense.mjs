@@ -8,11 +8,14 @@
 // NEUTRAL / Speech 是默认态，不值一提，翻成空——旁注里只出现「像难过」「有笑声」这种真信号。
 
 import { fork } from 'node:child_process';
+import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { log } from './log.mjs';
 
-const ENABLED = process.env.CALL_SENSE !== '0';
+// 模型没下载就整层跳过（别让子进程起了又挂、挂了又拉）
+const MODEL_DIR = process.env.SENSE_MODEL_DIR || './models/sensevoice';
+const ENABLED = process.env.CALL_SENSE !== '0' && fs.existsSync(`${MODEL_DIR}/model.int8.onnx`);
 const WORKER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'sense-worker.cjs');
 
 const EMOTION = { HAPPY: '开心', SAD: '难过', ANGRY: '生气', NEUTRAL: '', FEARFUL: '害怕', DISGUSTED: '厌烦', SURPRISED: '惊讶' };
@@ -70,7 +73,7 @@ export function analyze(pcm, waitMs = 500) {
 const VOICE_WORKER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'voice-worker.cjs');
 let vchild = null; let vready = false; const vpending = new Map();
 function vspawn() {
-  if (process.env.CALL_VOICE === '0') return;
+  if (process.env.CALL_VOICE === '0' || !fs.existsSync(`${process.env.SPEAKER_MODEL_DIR || './models/speaker'}/owner.json`)) return;
   vchild = fork(VOICE_WORKER, [], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] });
   vready = false;
   vchild.on('message', (m) => {
