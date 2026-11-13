@@ -32,7 +32,7 @@ iPhone（CallKit 来电界面 + 收发声音）
 | [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-typescript) / [Anthropic SDK](https://github.com/anthropics/anthropic-sdk-typescript) | 模型 | 见原仓库 |
 | [ws](https://github.com/websockets/ws) | WebSocket | MIT |
 | [opusscript](https://github.com/abalabahaha/opusscript) | Opus 编解码 | MIT |
-| [ocean-listen](#) | 量气声/抖/哑的尺子（思路） | 待补链接 |
+| [ocean-listen](https://github.com/ennisaaaaaaaa-stack/ocean-listen)（由 [whale-listen](https://github.com/migratorywhale/whale-listen) 分叉而来） | 听语气第三层：照它 `voice.py` 的那几把尺（有声比例、HNR、jitter、shimmer、音高、尾音走向），用纯 JS 在每句话的 PCM 上量气声、喘、抖、哑 | MIT |
 | ElevenLabs（付费服务，非开源） | 实时转文字、合成声音 | — |
 | Apple CallKit / PushKit | 手机来电界面、VoIP 推送 | — |
 
