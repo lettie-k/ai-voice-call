@@ -7,6 +7,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { config } from './config.mjs';
 import { log } from './log.mjs';
 import { tools as userTools, runTool } from './tools.mjs';
+import { replyOpenAi, warmOpenAi } from './llm-openai.mjs';
 
 /** 一轮最多说这么多字。电话本来就不该长篇大论，也是省合成额度的闸 */
 export const MAX_REPLY_CHARS = 200;
@@ -16,9 +17,14 @@ const KEEP_TURNS = 12;
 const STALL_MS = 12_000;
 
 // 走官方用 ANTHROPIC_API_KEY；走代理 / 兼容 Anthropic 接口的中转（比如 OpenRouter）设 ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN，SDK 自己会读
-const client = config.anthropicKey ? new Anthropic({ apiKey: config.anthropicKey })
+// 走 GPT 格式（LLM_API=openai）时不建 Anthropic 客户端，见 llm-openai.mjs
+const useOpenAi = config.llm === 'openai';
+const client = useOpenAi ? null
+  : config.anthropicKey ? new Anthropic({ apiKey: config.anthropicKey })
   : process.env.ANTHROPIC_AUTH_TOKEN ? new Anthropic({ apiKey: null })
   : null;
+/** 有没有一条能用的模型腿（Ollama 这种本地的可以不要 key，只要设了 OPENAI_BASE_URL） */
+const hasLlm = useOpenAi ? Boolean(config.openaiKey || process.env.OPENAI_BASE_URL) : Boolean(client);
 
 /**
  * 电话档的说明，跟在人格后面。每一条都是我们踩出来的——写成字的东西都会被念出来。
@@ -127,8 +133,15 @@ function callSystem(persona) {
 
 /** 接通就预热（坑 #25）：她开口前拿同一份 system + tools 空跑 1 个 token，第一句就是热的 */
 export async function warmUp(persona) {
-  if (!client || process.env.CALL_MOCK === '1') return;
+  if (!hasLlm || process.env.CALL_MOCK === '1') return;
   const t0 = Date.now();
+  if (useOpenAi) {
+    try {
+      const u = await warmOpenAi(`${persona}\n\n${callHint()}`, userTools);
+      log.info('warm.done', { ms: Date.now() - t0, cached: u?.prompt_tokens_details?.cached_tokens ?? u?.prompt_cache_hit_tokens ?? null });
+    } catch (e) { log.info('warm.failed', { err: String(e?.message || e).slice(0, 120) }); }
+    return;
+  }
   try {
     const r = await client.messages.create({
       model: config.model, max_tokens: 1, system: callSystem(persona),
@@ -149,8 +162,8 @@ export async function replyOnce({ ctx, persona, userText, note = '', epochAt, ep
   }
 
   // 桩回复：CALL_MOCK=1 时不调模型，照样能验状态机、打断、挂断（我们没钱/没 key 的那几天就靠它）
-  if (process.env.CALL_MOCK === '1' || !client) {
-    if (!client && process.env.CALL_MOCK !== '1') onNotice?.('no_key', '没配 ANTHROPIC_API_KEY，先用桩回复');
+  if (process.env.CALL_MOCK === '1' || !hasLlm) {
+    if (!hasLlm && process.env.CALL_MOCK !== '1') onNotice?.('no_key', useOpenAi ? '没配 OPENAI_API_KEY，先用桩回复' : '没配 ANTHROPIC_API_KEY，先用桩回复');
     const body = /挂|拜拜|再见/.test(userText) ? '嗯，那你先忙，拜拜。\n[挂断]' : '嗯，我在。你慢慢说，我听着。';
     let out = '';
     for (const ch of body) {
@@ -180,28 +193,37 @@ export async function replyOnce({ ctx, persona, userText, note = '', epochAt, ep
   const system = callSystem(persona);
   const convo = [...messages];
   try {
-    // 工具循环：模型要调工具就执行、把结果塞回去再问，直到它不再调工具
-    for (let round = 0; round < 6; round++) {
-      const st = client.messages.stream({
-        model: config.model, max_tokens: config.maxTokens, system, messages: convo,
-        ...(userTools.length ? { tools: userTools } : {}),
-      }, { signal: ac.signal });
-      st.on('text', emit);
-      const final = await st.finalMessage();
-      if (final.stop_reason !== 'tool_use') break;
-      // 调工具那段时间别让看门狗咬（一个工具可能要几十秒）
-      if (dog) { clearTimeout(dog); dog = null; }
-      convo.push({ role: 'assistant', content: final.content });
-      const results = [];
-      for (const b of final.content.filter((c) => c.type === 'tool_use')) {
-        onTool?.('start', { id: b.id, name: b.name, input: b.input });
-        let out; let ok = true;
-        try { out = await runTool(b.name, b.input); } catch (e) { ok = false; out = `出错：${e?.message || e}`; }
-        onTool?.('result', { id: b.id, name: b.name, ok });
-        results.push({ type: 'tool_result', tool_use_id: b.id, content: String(out).slice(0, 4000), is_error: !ok });
+    if (useOpenAi) {
+      // GPT 格式那条腿：时间直接拼在人格后面（这类接口多是自动前缀缓存，没有缓存点可分；时间放在最后，前面那段照样命中）
+      await replyOpenAi({
+        system: `${persona}\n\n${callHint()}`, messages: convo, tools: userTools, runTool, onText: emit, onTool,
+        signal: ac.signal, stillMine: () => epochNow() === epochAt,
+        onToolStart: () => { if (dog) { clearTimeout(dog); dog = null; } },
+      });
+    } else {
+      // 工具循环：模型要调工具就执行、把结果塞回去再问，直到它不再调工具
+      for (let round = 0; round < 6; round++) {
+        const st = client.messages.stream({
+          model: config.model, max_tokens: config.maxTokens, system, messages: convo,
+          ...(userTools.length ? { tools: userTools } : {}),
+        }, { signal: ac.signal });
+        st.on('text', emit);
+        const final = await st.finalMessage();
+        if (final.stop_reason !== 'tool_use') break;
+        // 调工具那段时间别让看门狗咬（一个工具可能要几十秒）
+        if (dog) { clearTimeout(dog); dog = null; }
+        convo.push({ role: 'assistant', content: final.content });
+        const results = [];
+        for (const b of final.content.filter((c) => c.type === 'tool_use')) {
+          onTool?.('start', { id: b.id, name: b.name, input: b.input });
+          let out; let ok = true;
+          try { out = await runTool(b.name, b.input); } catch (e) { ok = false; out = `出错：${e?.message || e}`; }
+          onTool?.('result', { id: b.id, name: b.name, ok });
+          results.push({ type: 'tool_result', tool_use_id: b.id, content: String(out).slice(0, 4000), is_error: !ok });
+        }
+        convo.push({ role: 'user', content: results });
+        if (epochNow() !== epochAt) break;
       }
-      convo.push({ role: 'user', content: results });
-      if (epochNow() !== epochAt) break;
     }
   } catch (err) {
     if (dog) { clearTimeout(dog); dog = null; }

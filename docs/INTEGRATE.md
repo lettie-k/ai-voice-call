@@ -6,7 +6,7 @@
 ## 给 AI 的总原则
 
 1. **不要做界面**。这里只有功能。按钮、通话页、字幕的样子，照用户项目现有的设计做，或者问用户。
-2. **钥匙只放服务器**。`ELEVENLABS_API_KEY`、`ANTHROPIC_API_KEY`、`CALL_SECRET` 只能出现在 `server/.env` 和用户自己的后端里，绝不进客户端代码、绝不提交进仓库。
+2. **钥匙只放服务器**。`ELEVENLABS_API_KEY`、`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`、`CALL_SECRET` 只能出现在 `server/.env` 和用户自己的后端里，绝不进客户端代码、绝不提交进仓库。
 3. **先在本地跑通再接前端**：用 `CALL_MOCK=1` + `text` 消息把状态机跑一遍（见第 1 步），再接麦克风。
 4. 有问题先看 `docs/PROBLEMS.md`，那些坑多半已经写了。
 
@@ -20,6 +20,7 @@ npm start                 # 默认 127.0.0.1:8787
 ```
 
 - 人格：把 `persona.example.md` 换成用户自己的，`.env` 里 `PERSONA_FILE` 指过去。
+- 模型：用户用的不是 Claude 时，问清楚是哪家、用的哪个型号，设 `LLM_API=openai` + `OPENAI_BASE_URL` + `OPENAI_API_KEY` + `CALL_MODEL`（各家地址见 `.env.example`）。README 的「换模型」表里有实测的首字延迟，超过两秒的要提醒用户电话里会觉得卡。
 - 公网访问：放在 HTTPS 反代后面（Caddy、Nginx、Cloudflare Tunnel 都行），客户端连 `wss://域名/v1/call`。
 - 不花钱先跑通：`.env` 里加 `CALL_MOCK=1`（模型用桩回复），客户端连上后发 `{"type":"mute"}` 和 `{"type":"text","content":"你好"}`，应该收到 `heard` → `reply_done`；发「拜拜」应该收到 `bye`。签测试票据：`npm run ticket`。
 

@@ -49,6 +49,10 @@ const FALSE_BARGE_MS = 2500;
 
 /** 只认这些才挂：「好了」「先这样」「晚安」都不算（坑 #20） */
 const FAREWELL = /(拜拜|拜+|再见|byebye|bye|挂了|挂断|挂电话)/i;
+/** 整句只有道别（「好拜拜」「那我挂了哦」），没有别的内容 */
+const ONLY_FAREWELL = /^(好|好的|嗯|那|那我|我|先)*(拜拜|拜+|再见|byebye|bye|挂了|挂啦|挂电话了?)(啦|了|哦|喽|咯|呀|啊)*$/i;
+/** AI 那句也是在道别 */
+const SAID_BYE = /(拜拜|再见|晚安|bye|下次聊|回头聊)/i;
 
 /** 全零帧（段间气口） */
 function isSilence(buf) {
@@ -639,6 +643,8 @@ export class CallSession {
     // 它写了 [挂断] 但用户没说道别词 → 当它没写（小模型会被「好了」「先这样」骗到）
     let hangup = r.hangup;
     if (hangup && !FAREWELL.test(userText)) { log.info('call.hangup_vetoed', { id: this.id }); hangup = false; }
+    // 有的模型（实测 GPT-5.4 mini）不写 [挂断]：用户这句**只有**道别、它也回了道别，照样挂——别让用户干等 30 秒被静默挂
+    if (!hangup && !r.failed && ONLY_FAREWELL.test(norm(userText)) && SAID_BYE.test(r.text)) { log.info('call.hangup_inferred', { id: this.id }); hangup = true; }
     log.info('call.turn.done', { id: this.id, epoch: epochAt, ms: Date.now() - turnT0, chars: r.text.length, failed: !!r.failed, hangup });
     this.send({ type: 'reply_done', text: r.text, epoch: epochAt, hangup });
     // 挂断前等最后一句告别念完

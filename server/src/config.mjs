@@ -17,8 +17,11 @@ export const config = {
   ttsModel: process.env.ELEVENLABS_TTS_MODEL || 'eleven_flash_v2_5',
   lang: process.env.CALL_LANG || 'zh',
 
-  // 模型：Anthropic API
+  // 模型：anthropic（默认，Claude 和兼容 Claude 接口的中转）或 openai（GPT 格式：GPT、DeepSeek、千问、Kimi、Ollama……）
+  llm: (process.env.LLM_API || 'anthropic').toLowerCase(),
   anthropicKey: process.env.ANTHROPIC_API_KEY || '',
+  openaiKey: process.env.OPENAI_API_KEY || '',
+  openaiBase: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
   model: process.env.CALL_MODEL || 'claude-haiku-4-5',
   maxTokens: num(process.env.CALL_MAX_TOKENS, 400),
 
