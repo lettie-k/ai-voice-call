@@ -167,6 +167,7 @@ export class CallSession {
   interrupt(why, force = false) {
     // 工具在途不打断（坑 #14）：用户这几截话攒着（heldDuringTool），工具回来、这轮说完再交
     if (this.toolBusy && !force) { log.info('call.interrupt.deferred', { id: this.id, why }); return; }
+    if (this.hangingUp && !force) return;   // 在念道别：别掐，念完就挂（坑 #27）
     const dying = this.epoch;
     this.epoch += 1;
     if (this.tts) this.tts.cancel(`t${dying}`);
@@ -201,7 +202,7 @@ export class CallSession {
   resumeCut(kind, nod = '') {
     const b = this.bargeCheck;
     this.clearBargeCheck();
-    if (!b || this.busy || this.closed || this.held) return;
+    if (!b || this.busy || this.closed || this.held || this.hangingUp) return;
     log.info('call.barge_false', { id: this.id, kind });
     const what = kind === 'nod' ? `用户「${nod.trim()}」了一声，是在听你说、不是要插话，这一声` : '用户那边一点响动（不是在说话）';
     const where = b.tail ? `你说到「…${b.tail}」` : '你刚才那句';
@@ -388,7 +389,7 @@ export class CallSession {
           if (this.staleCtx(ctxId)) return;
           if (this.codec && this.ws.readyState === 1) { for (const m of this.codec.encodePcm(Buffer.alloc(0), { flush: true })) this.ws.send(m, { binary: true }); }
           const m = /^t(\d+)/.exec(String(ctxId || ''));
-          if (info?.last && m) this.send({ type: 'tts_done', epoch: Number(m[1]) });
+          if (info?.last && m) { this.ttsDoneEpoch = Number(m[1]); this.send({ type: 'tts_done', epoch: this.ttsDoneEpoch }); }
         },
         onNotice: (message) => this.notice(message),
         onClose: (code) => { if (this.tts === legRef) { this.tts = null; if (!this.closed) log.info('tts.dropped', { id: this.id, code }); } },
@@ -407,6 +408,7 @@ export class CallSession {
 
   /** 转写定稿了一段。像没说完就先攥着（最多两次），用户接着说就拼起来 */
   heard(text) {
+    if (this.hangingUp) return;   // 用户已经说了拜拜、AI 在念道别：这时的声音不另起一轮
     if (this.phantomUtt(text)) { if (this.held && !this.holdTimer) this.armHold(HOLD_MS); this.resumeCut('noise'); return; }
     this.clearBargeCheck();   // 用户真说话了：那一下打断是对的
     if (this.busy) this.yieldTurn('continued');
@@ -640,9 +642,27 @@ export class CallSession {
     log.info('call.turn.done', { id: this.id, epoch: epochAt, ms: Date.now() - turnT0, chars: r.text.length, failed: !!r.failed, hangup });
     this.send({ type: 'reply_done', text: r.text, epoch: epochAt, hangup });
     // 挂断前等最后一句告别念完
-    if (hangup) { setTimeout(() => this.close('user_said_bye'), Math.max(2500, this.playUntil - Date.now() + 500)); return; }
+    if (hangup) { this.closeAfterSpeech('user_said_bye', epochAt); return; }
     this.setState('listening');
     this.armIdle();
+  }
+
+  /**
+   * 道别那句念完再挂（坑 #27）：等这一轮合成真发完（tts_done），再等客户端大约放完（playUntil），多留 0.8 秒；最多 20 秒。
+   * 只按 reply_done 那一刻的 playUntil 算不行——那时合成还在出最后一段，playUntil 还没长到头
+   */
+  closeAfterSpeech(reason, epochAt) {
+    if (this.closed || this.hangingUp) return;
+    this.hangingUp = true;
+    this.clearIdle();
+    const t0 = Date.now();
+    const tick = () => {
+      if (this.closed) return;
+      const spoken = !this.tts || this.muted || this.ttsDoneEpoch === epochAt;
+      if ((spoken && Date.now() >= this.playUntil + 800) || Date.now() - t0 > 20_000) { this.close(reason); return; }
+      setTimeout(tick, 200);
+    };
+    tick();
   }
 
   close(reason) {

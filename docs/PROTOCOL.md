@@ -47,7 +47,7 @@ wss://你的中继/v1/call?ticket=<票据>&client=<ios|web|…>&direction=<out|i
 | `transcript` | `text`、`final`、`epoch` | 用户这句的草稿（`final:false`）或定稿（`final:true`）。想显示「你说的话」就用它。 |
 | `heard` | `text`、`epoch` | 这一句已经交给 AI 去答了（可能是几截拼起来的）。 |
 | `reply_delta` | `delta`、`epoch` | AI 正在说的字（已剥掉语气标签，可以直接当字幕）。 |
-| `reply_done` | `text`、`hangup`、`epoch` | 这一轮说完了。`hangup:true` 表示用户道别了，中继会在告别念完后发 `bye`。 |
+| `reply_done` | `text`、`hangup`、`epoch` | 这一轮说完了。`hangup:true` 表示用户道别了，中继会在告别念完后发 `bye`。**别在这里挂**，等 `bye`。 |
 | `tts_done` | `epoch` | 这一轮最后一段声音已经全部发出（不是播完）。需要精确判断「说完了」时用它，别靠音频空隙猜。 |
 | `interrupted` | `epoch`、`why` | 被打断了。**立刻清空本地还没播的音频**，`epoch` 小于这个值的下行音频都别再播。 |
 | `tool` | `phase`：`start` / `result`，`name`、`ok` | AI 在调工具。可以显示「正在…」。 |
@@ -56,7 +56,7 @@ wss://你的中继/v1/call?ticket=<票据>&client=<ios|web|…>&direction=<out|i
 | `leg` | `name`：`stt` / `tts`，`status` | 转写 / 合成那条线连上了或断了。 |
 | `muted` | `value` | 回应 `mute`。 |
 | `pong` | `t` | 回应 `ping`。 |
-| `bye` | `reason`、`chars` | 电话结束。`reason=restart` 是中继在重启，不是出错。 |
+| `bye` | `reason`、`chars` | 电话结束。`reason=restart` 是中继在重启，不是出错。收到后先把本地还没放完的声音放完再收，不然最后那句道别听不到。 |
 
 ## 轮次编号（epoch）
 

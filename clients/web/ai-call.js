@@ -105,7 +105,7 @@ export class AICall {
       sock.onclose = (ev) => { clearTimeout(bail); reject(new Error(`被关了 code=${ev.code}`)); };
     });
     sock.onmessage = (e) => this.onMessage(e);
-    sock.onclose = () => { this.setState('ended'); this.teardown(); };
+    sock.onclose = () => { if (this.state !== 'ended' && !this.byeAt) { this.setState('ended'); this.teardown(); } };
   }
 
   onMessage(e) {
@@ -150,11 +150,17 @@ export class AICall {
       case 'notice': this.ev.onNotice?.(m.message); break;
       case 'hangup_soon': this.ev.onNotice?.('太久没说话，这通电话要挂了'); break;
       case 'leg': if (m.name === 'stt' && m.status === 'down') this.ev.onNotice?.('转写没起来，它听不见你'); break;
-      case 'bye':
-        this.ev.onEnded?.(m.reason, m.chars ?? 0);
-        this.setState('ended');
-        this.teardown();
+      case 'bye': {
+        this.byeAt = Date.now();
+        // 先把排好的道别放完再收（坑 #27），最多 15 秒
+        const left = this.ac ? Math.max(0, this.playAt - this.ac.currentTime) : 0;
+        setTimeout(() => {
+          this.ev.onEnded?.(m.reason, m.chars ?? 0);
+          this.setState('ended');
+          this.teardown();
+        }, Math.min(15, left + 0.3) * 1000);
         break;
+      }
     }
   }
 

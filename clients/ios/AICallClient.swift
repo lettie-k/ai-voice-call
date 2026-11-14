@@ -355,8 +355,8 @@ final class AICallClient: NSObject, URLSessionWebSocketDelegate {
             if let t = j["t"] as? Double { let rtt = Date().timeIntervalSince1970 * 1000 - t; if rtt > 0, rtt < 20000 { rttMs = 0.7 * rttMs + 0.3 * rtt } }
         case "ready": sessionId = j["session"] as? String ?? ""
         case "resumed": lastPong = Date(); onDebug?("接回来了（\(j["state"] as? String ?? "?")）")
-        case "bye": finish(j["reason"] as? String ?? "bye")
-        case "reply_done": if (j["hangup"] as? Bool) == true { finish("he_hung_up") }
+        // 只认 bye，而且先把手机里攒着的道别放完再挂（坑 #27：以前 reply_done 带 hangup 当场挂，最后那句没念出来）
+        case "bye": finishAfterDrain("bye:\(j["reason"] as? String ?? "")")
         case "interrupted": dropPending()   // 打断：还没放的扔掉
         case "transcript":
             // 插嘴要客户端自己判（网页版也是）：中继那头模型早说完了、AI切回「听着」，
@@ -388,6 +388,16 @@ final class AICallClient: NSObject, URLSessionWebSocketDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.finish("local") }
     }
 
+    /// 把还没放完的声音放完再挂（最多等 15 秒）。期间 socket 被关也走这里，不重复
+    private var draining = false
+    private func finishAfterDrain(_ reason: String) {
+        guard !closed, !draining else { return }
+        draining = true
+        ringLock.lock(); let pending = ring.count - ringHead; ringLock.unlock()
+        let wait = min(15, Double(max(0, pending)) / 16000 + 0.4)
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in self?.finish(reason) }
+    }
+
     private func finish(_ reason: String) {
         guard !closed else { return }
         closed = true
@@ -407,7 +417,7 @@ final class AICallClient: NSObject, URLSessionWebSocketDelegate {
 
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
         guard webSocketTask === task, !closed else { return }
-        if closeCode == .normalClosure || closeCode == .goingAway { finish("closed:\(closeCode.rawValue)") }   // 中继正经关的（bye/重启）
+        if closeCode == .normalClosure || closeCode == .goingAway { finishAfterDrain("closed:\(closeCode.rawValue)") }   // 中继正经关的（bye/重启）
         else { reconnect("closed:\(closeCode.rawValue)") }
     }
 }

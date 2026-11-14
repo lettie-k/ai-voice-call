@@ -43,7 +43,7 @@
 
 - [docs/INTEGRATE.md](docs/INTEGRATE.md)：怎么装（写给帮你装的 AI 看）
 - [docs/PROTOCOL.md](docs/PROTOCOL.md)：客户端 ↔ 中继的协议
-- [docs/PROBLEMS.md](docs/PROBLEMS.md)：我们踩过的 26 个坑，每个都写了现象、原因、修法
+- [docs/PROBLEMS.md](docs/PROBLEMS.md)：我们踩过的 27 个坑，每个都写了现象、原因、修法
 
 ## 借鉴和用到的
 
