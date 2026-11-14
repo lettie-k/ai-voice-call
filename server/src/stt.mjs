@@ -71,13 +71,17 @@ export async function openSttLeg({ onPartial, onCommitted, onNotice, onClosed, l
   const tokenMs = Date.now() - t0;
 
   const qs = new URLSearchParams({
-    model_id: 'scribe_v2_realtime',
+    // v3 live 比 v2 准（我们拿真电话录音比过：「宝贝/我不要」→「爸比」），价钱一样
+    model_id: process.env.STT_MODEL || 'scribe_v3_live',
+    filter_background_audio: 'true',   // 背景里的电视、路人少被转成字
     audio_format: 'pcm_16000',
     language_code: lang,
     commit_strategy: 'vad',            // 服务端判停，不用自己写 VAD
     vad_silence_threshold_secs: String(VAD_SILENCE_SECS),
     token,
   });
+  // 常被转错的词（称呼、名字）：转写会往这几个上靠。别放太多，放多了普通话也往上靠
+  for (const k of (process.env.STT_KEYTERMS || '').split(',').map((x) => x.trim()).filter(Boolean)) qs.append('keyterms', k);
 
   const ws = new WebSocket(`wss://api.elevenlabs.io/v1/speech-to-text/realtime?${qs}`);
   let ready = false;

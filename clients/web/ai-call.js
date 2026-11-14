@@ -21,6 +21,8 @@ const SAMPLE_RATE = 16000;
 const PLAY_LEAD_S = 0.08;
 
 const norm = (t) => String(t || '').replace(/[\s\p{P}]/gu, '');
+/** 附和：「嗯」「对」「好」「OK」——用户在听，不是要插话，不掐（中继 isNod 同一份） */
+const NOD = /^(?:嗯哼|对呀|对啊|是呀|是啊|好呀|好的|对的|是的|没错|okay|ok|yeah|yes|[对是好行嗯恩啊哦噢喔呃额唔哈嘿])+$/i;
 /** AI 自己的声音漏回来被转写了：转写是它最近念的内容的子串，或二元组重合 ≥ 60% */
 function isEcho(heard, spoken) {
   const h = norm(heard), sp = norm(spoken);
@@ -130,7 +132,7 @@ export class AICall {
           const prev = this.bargeSeen; const now = Date.now();
           const sustained = prev && now - prev.at < 1500 && text.length > prev.text.length;
           this.bargeSeen = { text, at: now };
-          if (text.length >= 4 && sustained) {
+          if (text.length >= 4 && sustained && !NOD.test(norm(text))) {
             this.stopAudio(); this.bargeSeen = null;
             try { this.ws?.send(JSON.stringify({ type: 'interrupt', heard: text })); } catch { /* 忽略 */ }
           }

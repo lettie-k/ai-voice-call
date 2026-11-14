@@ -15,7 +15,10 @@ const KEEP_TURNS = 12;
 /** 首字看门狗（坑 #16）：这么久一个字都没来就掐，上层念一句兜底，不许静默 */
 const STALL_MS = 12_000;
 
-const client = config.anthropicKey ? new Anthropic({ apiKey: config.anthropicKey }) : null;
+// 走官方用 ANTHROPIC_API_KEY；走代理 / 兼容 Anthropic 接口的中转（比如 OpenRouter）设 ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN，SDK 自己会读
+const client = config.anthropicKey ? new Anthropic({ apiKey: config.anthropicKey })
+  : process.env.ANTHROPIC_AUTH_TOKEN ? new Anthropic({ apiKey: null })
+  : null;
 
 /**
  * 电话档的说明，跟在人格后面。每一条都是我们踩出来的——写成字的东西都会被念出来。
@@ -111,6 +114,31 @@ export class CallContext {
  *   打断之后在途的字必须自弃，否则用户已经插话了它还在往下说。
  * note：听感旁注（只挂在这一轮发给模型的那条上，不进上下文）
  */
+/**
+ * system 拆两块（坑 #25）：人格一整块进缓存，会变的时间（精确到分钟）挂在缓存点**后面**。
+ * 拼在一起的话，分钟一跳整段人格就得重新读一遍——第一句等十几秒、之后每句都多一秒。
+ */
+function callSystem(persona) {
+  return [
+    { type: 'text', text: persona, cache_control: { type: 'ephemeral' } },
+    { type: 'text', text: callHint() },
+  ];
+}
+
+/** 接通就预热（坑 #25）：她开口前拿同一份 system + tools 空跑 1 个 token，第一句就是热的 */
+export async function warmUp(persona) {
+  if (!client || process.env.CALL_MOCK === '1') return;
+  const t0 = Date.now();
+  try {
+    const r = await client.messages.create({
+      model: config.model, max_tokens: 1, system: callSystem(persona),
+      messages: [{ role: 'user', content: '.' }],
+      ...(userTools.length ? { tools: userTools } : {}),
+    });
+    log.info('warm.done', { ms: Date.now() - t0, cacheWrite: r.usage?.cache_creation_input_tokens ?? null, cacheRead: r.usage?.cache_read_input_tokens ?? null });
+  } catch (e) { log.info('warm.failed', { err: String(e?.message || e).slice(0, 120) }); }
+}
+
 export async function replyOnce({ ctx, persona, userText, note = '', epochAt, epochNow, onDelta, onNotice, onTool, retracted = null }) {
   if (retracted?.()) return { text: '', hangup: false, aborted: true, failed: false };
   ctx.pushUser(userText);
@@ -149,7 +177,7 @@ export async function replyOnce({ ctx, persona, userText, note = '', epochAt, ep
     onDelta(delta);
   };
 
-  const system = [{ type: 'text', text: `${persona}\n\n${callHint()}`, cache_control: { type: 'ephemeral' } }];
+  const system = callSystem(persona);
   const convo = [...messages];
   try {
     // 工具循环：模型要调工具就执行、把结果塞回去再问，直到它不再调工具

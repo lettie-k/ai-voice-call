@@ -38,6 +38,15 @@ const CONT_SPOKEN_MS = Number(process.env.CALL_CONT_SPOKEN_MS || 1500);
 const HOLD_WATCH_MS = 3000;
 /** 打断门槛：它说话期间用户冒出这么多字才算插话（防回声和单字误触） */
 const BARGE_IN_CHARS = 4;
+/**
+ * 附和（坑 #26）：AI 说着的时候用户「嗯」「对」「好」「OK」「哈哈」——是在听，不是要插话。
+ * 不打断、不另起一轮，下一轮告诉 AI「她应了几声」
+ */
+const NOD_ONLY = /^[\s\p{P}～~]*(?:(?:嗯哼|对呀|对啊|是呀|是啊|好呀|好的|对的|是的|没错|okay|ok|yeah|yes|[对是好行嗯恩啊哦噢喔呃额唔哈嘿])[\s\p{P}～~]*){1,6}$/iu;
+export const isNod = (t) => NOD_ONLY.test(String(t || ''));
+/** 被用户那边的声音掐断后，多久还没听到正经话就当是杂音，让 AI 接着把没说完的说完（坑 #26） */
+const FALSE_BARGE_MS = 2500;
+
 /** 只认这些才挂：「好了」「先这样」「晚安」都不算（坑 #20） */
 const FAREWELL = /(拜拜|拜+|再见|byebye|bye|挂了|挂断|挂电话)/i;
 
@@ -82,7 +91,7 @@ export function isEcho(heard, spoken) {
 const NARRATION = /(我先|让我|我来|我去)?(调用|查|看|读)(一下|看|下)?.{0,8}(工具|时间)|^\s*调用|^-{3,}$|^[\s\p{P}]*$|^\s*(现在(是)?)?\s*\d{1,2}[:：]\d{2}\s*[。.！!]?\s*$/u;
 
 let personaCache = null;
-function loadPersona() {
+export function loadPersona() {
   if (personaCache != null) return personaCache;
   try { personaCache = fs.readFileSync(config.personaFile, 'utf8'); } catch { personaCache = ''; }
   return personaCache;
@@ -164,6 +173,39 @@ export class CallSession {
     log.info('call.interrupt', { id: this.id, epoch: this.epoch, why });
     this.send({ type: 'interrupted', epoch: this.epoch, why });
     this.setState('listening');
+    // 被用户那边的声音掐断的：先别认定用户要说话（见 resumeCut）
+    if (why === 'client' || why === 'barge_in') this.armBargeCheck();
+  }
+
+  armBargeCheck() {
+    this.clearBargeCheck();
+    this.bargeCheck = { tail: stripAudioTags(this.spoken).slice(-40), tries: 0 };
+    const tick = () => {
+      const b = this.bargeCheck;
+      if (!b || this.closed) return;
+      // 草稿还在来 = 用户在说话，一直等到定稿；手里攥着半句：最多再等两回
+      if (Date.now() - (this.sttLastText || 0) < 1200 || (this.held && b.tries++ < 2)) {
+        this.bargeTimer = setTimeout(tick, 1200); return;
+      }
+      this.resumeCut('noise');
+    };
+    this.bargeTimer = setTimeout(tick, FALSE_BARGE_MS);
+  }
+
+  clearBargeCheck() {
+    if (this.bargeTimer) { clearTimeout(this.bargeTimer); this.bargeTimer = null; }
+    this.bargeCheck = null;
+  }
+
+  /** 打断它的不是用户的话（杂音 / 一声附和）：让它把没说完的接着说完，别问「怎么了」（坑 #26） */
+  resumeCut(kind, nod = '') {
+    const b = this.bargeCheck;
+    this.clearBargeCheck();
+    if (!b || this.busy || this.closed || this.held) return;
+    log.info('call.barge_false', { id: this.id, kind });
+    const what = kind === 'nod' ? `用户「${nod.trim()}」了一声，是在听你说、不是要插话，这一声` : '用户那边一点响动（不是在说话）';
+    const where = b.tail ? `你说到「…${b.tail}」` : '你刚才那句';
+    this.takeTurn(`（${what}把你打断了。${where}就停了，后面的多半没听到。直接接着把没说完的说完，别问怎么了，也别提被打断）`, '', { hidden: true });
   }
 
   /** 静默计时从声音播完之后才开始数（坑 #3） */
@@ -196,6 +238,7 @@ export class CallSession {
   /** 上行音频。转写腿懒开：第一帧到了才去连——接通了一句没说就一分钱不花 */
   feedAudio(pcm) {
     if (this.closed) return;
+    if (this.ringing) return;   // 手机那边还在「正在呼叫」，这时的声音不是对 AI 说的
     this.gotAudio = true;
     const now = Date.now();
     // 转写卡住看门狗（坑 #7）：「现在还在响」（3 秒内有过线的帧）却 5 秒没有任何转写 → 换一条，并把这段音频补给新腿
@@ -246,9 +289,9 @@ export class CallSession {
         if (this.state === 'listening') this.armIdle();
         if (!this.utt) this.utt = { startAt: Date.now(), sumSq: 0, n: 0, holds: 0, pcm: [], bytes: 0 };
         // 开口打断：它正说着，用户冒出够长的一句 → 当场停。它才刚开口的话那是用户没说完（yieldTurn）
-        if (this.state === 'speaking' && text.length >= BARGE_IN_CHARS) {
+        if (this.state === 'speaking' && text.length >= BARGE_IN_CHARS && !isNod(text)) {
           if (!this.yieldTurn('resumed')) this.interrupt('barge_in');
-        } else if (this.state === 'thinking' && this.busy && norm(text).length >= 2) {
+        } else if (this.state === 'thinking' && this.busy && norm(text).length >= 2 && !isNod(text)) {
           this.yieldTurn('resumed');
         }
         if (this.held) this.armHold(HOLD_WATCH_MS);
@@ -256,10 +299,20 @@ export class CallSession {
       },
       onCommitted: (text) => {
         this.sttLastText = Date.now();
-        if (!this.hwAec && isEcho(text, this.spoken)) { log.info('call.echo_dropped', { id: this.id, text: text.slice(0, 40) }); return; }
+        if (!this.hwAec && isEcho(text, this.spoken)) { log.info('call.echo_dropped', { id: this.id, text: text.slice(0, 40) }); this.resumeCut('noise'); return; }
         // 系统回声消除刚起来那几秒还没收敛：它正念着、转写又一字不差是它刚念的，那就是漏回来的（只认原样子串）
-        if (this.hwAec && this.state === 'speaking' && norm(text).length >= 2 && norm(this.spoken).slice(-60).includes(norm(text))) return;
-        if (!norm(text)) return;   // 只有一个「。」：接通那一下的底噪
+        if (this.hwAec && this.state === 'speaking' && norm(text).length >= 2 && norm(this.spoken).slice(-60).includes(norm(text))) { this.resumeCut('noise'); return; }
+        if (!norm(text)) { this.resumeCut('noise'); return; }   // 只有一个「。」：接通那一下的底噪
+        if (isNod(text)) {
+          // 刚被这一声掐断：接着说完；它还在说/在想：攒着，下一轮告诉它
+          if (this.bargeCheck) { this.utt = null; this.send({ type: 'transcript', text, final: true, epoch: this.epoch }); this.resumeCut('nod', text); return; }
+          if (this.state === 'speaking' || this.state === 'thinking') {
+            this.nods = `${this.nods || ''}${text}`.slice(-40);
+            this.utt = null;
+            this.send({ type: 'transcript', text, final: true, epoch: this.epoch });
+            return;
+          }
+        }
         this.heard(text);
       },
       onNotice: (message) => this.notice(message),
@@ -354,7 +407,8 @@ export class CallSession {
 
   /** 转写定稿了一段。像没说完就先攥着（最多两次），用户接着说就拼起来 */
   heard(text) {
-    if (this.phantomUtt(text)) { if (this.held && !this.holdTimer) this.armHold(HOLD_MS); return; }
+    if (this.phantomUtt(text)) { if (this.held && !this.holdTimer) this.armHold(HOLD_MS); this.resumeCut('noise'); return; }
+    this.clearBargeCheck();   // 用户真说话了：那一下打断是对的
     if (this.busy) this.yieldTurn('continued');
     const merged = this.held ? `${this.held} ${text}`.trim() : text;
     this.clearHold(false);
@@ -500,8 +554,10 @@ export class CallSession {
   }
 
   /** 用户说完一句（转写定稿，或联调时直接喂文本）→ AI 答一句 */
-  async takeTurn(userText, note = '') {
+  /** hidden：这一轮的「用户的话」是给 AI 的场记（比如 resumeCut），不发 heard，客户端字幕里不出现 */
+  async takeTurn(userText, note = '', { hidden = false } = {}) {
     if (!userText?.trim()) return;
+    if (this.nods) { note = `${note ? `${note}，` : ''}你上一轮说话的时候用户应了几声（${this.nods}），是在听`; this.nods = ''; }
     if (this.busy && this.toolBusy) {
       this.heldDuringTool = `${this.heldDuringTool || ''} ${userText}`.trim();
       return;
@@ -522,7 +578,7 @@ export class CallSession {
     this.turnLive = turn;
     log.info('call.turn.start', { id: this.id, epoch: epochAt });
     this.setState('thinking');
-    this.send({ type: 'heard', text: userText, epoch: epochAt });
+    if (!hidden) this.send({ type: 'heard', text: userText, epoch: epochAt });
 
     const persona = loadPersona();
     await this.ensureTts();

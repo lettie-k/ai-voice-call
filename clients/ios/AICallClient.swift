@@ -52,6 +52,11 @@ final class AICallClient: NSObject, URLSessionWebSocketDelegate {
     private var micPeak: Float = 0      // 这个 tick 窗口里的峰值，tick 时清零
     private var loud = 0
     private var lastBarge = Date.distantPast
+    /// 用户那边有声响时先把 AI 压低（坑 #26）：到这个时刻之前播放音量降到 0.25，掐不掐等转写。渲染线程读，主线程写
+    private var duckUntil: CFAbsoluteTime = 0
+    private var playGain: Float = 0.8
+    /// 附和：「嗯」「对」「好」「OK」——是在听，不是要插话（中继 isNod 同一份）
+    private static let nodRe = try! NSRegularExpression(pattern: "^(?:嗯哼|对呀|对啊|是呀|是啊|好呀|好的|对的|是的|没错|okay|ok|yeah|yes|[对是好行嗯恩啊哦噢喔呃额唔哈嘿])+$", options: [.caseInsensitive])
     private var observers: [NSObjectProtocol] = []
     private var pingTimer: DispatchSourceTimer?
 
@@ -132,10 +137,17 @@ final class AICallClient: NSObject, URLSessionWebSocketDelegate {
             let avail = self.ring.count - self.ringHead
             let take = min(n, max(0, avail))
             if take > 0 {
+                // 平时 0.8（压一点，回声消除收敛得快）；用户那边有响动时滑到 0.25，过了再滑回来，不咔哒
+                let target: Float = CFAbsoluteTimeGetCurrent() < self.duckUntil ? 0.25 : 0.8
+                var g = self.playGain
                 self.ring.withUnsafeBufferPointer { p in
                     let src = p.baseAddress! + self.ringHead
-                    for i in 0..<take { out[i] = src[i] * 0.8 }   // 压一点，回声消除收敛得快
+                    for i in 0..<take {
+                        if g < target { g = min(target, g + 0.002) } else if g > target { g = max(target, g - 0.002) }
+                        out[i] = src[i] * g
+                    }
                 }
+                self.playGain = g
                 self.ringHead += take
                 self.pulled += take
                 if self.ringHead > 16000 * 4 { self.ring.removeFirst(self.ringHead); self.ringHead = 0 }
@@ -255,19 +267,10 @@ final class AICallClient: NSObject, URLSessionWebSocketDelegate {
         let rms = (sq / Float(outN)).squareRoot()
         micLevel = 0.8 * micLevel + 0.2 * rms
         if rms > micPeak { micPeak = rms }
-        // 插嘴（按能量，不等转写）：用户开口够响、连续 3 帧（约 0.3s），而AI 那边还有 >0.5s 没放完 → 掐
+        // 用户那边够响、连续 3 帧（约 0.3s）：只把 AI 压低，不掐（坑 #26：按音量掐的话，噪音和一声「嗯」都会把它掐断，
+        // 它就问「怎么了」）。掐不掐等转写看是不是正经话；响一直在就一直压着
         loud = rms > 0.02 ? loud + 1 : 0
-        if loud >= 3 {
-            ringLock.lock(); let pending = ring.count - ringHead; ringLock.unlock()
-            if pending > 8000, Date().timeIntervalSince(lastBarge) > 1.2 {
-                lastBarge = Date(); barges += 1
-                dropPending()
-                if let d = try? JSONSerialization.data(withJSONObject: ["type": "interrupt", "heard": ""]), let m = String(data: d, encoding: .utf8) {
-                    t.send(.string(m)) { _ in }
-                }
-                onDebug?("插嘴 #\(barges) 能量 \(Int(rms * 1000)) · 扔了 \(pending / 16000)s")
-            }
-        }
+        if loud >= 3 { duckUntil = CFAbsoluteTimeGetCurrent() + 1.5 }
         carry = Array(samples[(outN * decimate)...])
         if let opus {
             // Opus：每 20ms 一包，攒 5 包（100ms）发一条 [u16 len][packet]…
@@ -360,7 +363,9 @@ final class AICallClient: NSObject, URLSessionWebSocketDelegate {
             // 可手机里还攒着好几秒没放完——这时用户开口，中继不当插嘴，声音就一直放，用户觉得它反应慢。
             // 系统回声消除开着，草稿里的字就是用户说的，不用等它长到几个字。
             if (j["final"] as? Bool) != true, let text = j["text"] as? String,
-               text.unicodeScalars.filter({ CharacterSet.alphanumerics.contains($0) || ($0.value >= 0x4E00 && $0.value <= 0x9FFF) }).count >= 2 {   // 光一个句号不算（9-21 把开场白掐了）
+               case let core = String(String.UnicodeScalarView(text.unicodeScalars.filter({ CharacterSet.alphanumerics.contains($0) || ($0.value >= 0x4E00 && $0.value <= 0x9FFF) }))),
+               core.count >= 2,   // 光一个句号不算（9-21 把开场白掐了）
+               Self.nodRe.firstMatch(in: core, range: NSRange(core.startIndex..., in: core)) == nil {   // 「嗯嗯」「对对」「OK」是在听，不掐
                 ringLock.lock(); let pending = ring.count - ringHead; ringLock.unlock()
                 if pending > 1600, Date().timeIntervalSince(lastBarge) > 1.2 {   // 还有 >0.1s 没放
                     lastBarge = Date(); barges += 1

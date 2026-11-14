@@ -5,7 +5,11 @@ import { WebSocketServer } from 'ws';
 import { config } from './config.mjs';
 import { log } from './log.mjs';
 import { ticketValid } from './ticket.mjs';
-import { CallSession, liveCalls, isEcho, MAX_REPLY_CHARS, IDLE_HANGUP_MS } from './session.mjs';
+import { CallSession, liveCalls, isEcho, isNod, loadPersona, MAX_REPLY_CHARS, IDLE_HANGUP_MS } from './session.mjs';
+import { warmUp } from './brain.mjs';
+
+/** 用户打给 AI 时，最多让手机「正在呼叫」多久等预热（客户端一般 10 秒左右没回音就当断了） */
+const RING_MAX_MS = 8000;
 
 const HEARTBEAT_MS = 15_000;
 const DEAD_MS = 45_000;
@@ -26,7 +30,7 @@ server.on('upgrade', (req, socket, head) => {
   const resumeId = url.searchParams.get('resume') || '';
   const existing = resumeId ? liveCalls.get(resumeId) : null;
   if (resumeId && (!existing || existing.closed)) { socket.write('HTTP/1.1 410 Gone\r\n\r\n'); socket.destroy(); return; }
-  wss.handleUpgrade(req, socket, head, (ws) => {
+  wss.handleUpgrade(req, socket, head, async (ws) => {
     if (existing) {
       existing.rebind(ws);
       bindSocket(existing, ws);
@@ -41,6 +45,17 @@ server.on('upgrade', (req, socket, head) => {
       codec: url.searchParams.get('codec') || 'pcm',
     });
     log.info('call.open', { id: call.id, client: call.client, direction: call.direction, codec: call.codec ? 'opus' : 'pcm' });
+    bindSocket(call, ws);
+    // 预热（坑 #25）：用户打过来时，手机上「正在呼叫」那几秒拿来把人格读进缓存，热好了再发 ready（客户端这时才算接通）。
+    // AI 打给用户不用等：接起来先念开场白，那几秒够热了
+    const warming = warmUp(loadPersona());
+    if (call.direction !== 'in') {
+      call.ringing = true;
+      call.ensureTts();
+      await Promise.race([warming, new Promise((r) => setTimeout(r, RING_MAX_MS))]);
+      call.ringing = false;
+      if (call.closed || ws.readyState !== 1) return;
+    }
     call.send({ type: 'ready', session: call.id, limits: { max_reply_chars: MAX_REPLY_CHARS, idle_hangup_ms: IDLE_HANGUP_MS } });
     call.armIdle();
     // 接通 5 秒一帧音频都没有：说出来（我们见过手机那头麦克风根本没在采，用户干等 30 秒被挂）
@@ -48,7 +63,6 @@ server.on('upgrade', (req, socket, head) => {
     // AI 拨用户：一接就先听见它。否则趁用户第一句还没说完，先把合成腿连上
     if (call.direction === 'in' && call.opener) call.sayOpener().catch((e) => call.notice(`开场白没念出来：${e?.message || e}`));
     else call.ensureTts();
-    bindSocket(call, ws);
   });
 });
 
@@ -68,11 +82,12 @@ function bindSocket(call, ws) {
         // 客户端自己判的打断（比如本地 VAD）。带来它听到的字：是 AI 自己的回声就不理
         const heard = String(msg.heard || '');
         if (heard && !call.hwAec && isEcho(heard, call.spoken)) break;
+        if (heard && isNod(heard)) break;   // 「嗯」「对」是在听，不打断（坑 #26）
         if (!call.yieldTurn('client')) call.interrupt('client');
         call.armIdle();
         break;
       }
-      case 'text': call.heard(String(msg.content || '')); break;          // 联调：当成转写出来的一句，一个字的转写额度都不花
+      case 'text': call.gotAudio = true; call.heard(String(msg.content || '')); break;   // 联调：当成转写出来的一句，一个字的转写额度都不花（也别报「没收到声音」）          // 联调：当成转写出来的一句，一个字的转写额度都不花
       case 'mute': call.muted = Boolean(msg.value ?? true); call.send({ type: 'muted', value: call.muted }); break;   // 联调：只出字幕
       case 'bye': call.close('client'); break;
       default: call.notice(`不认识 "${msg.type}" 这种消息`);
